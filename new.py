@@ -3,6 +3,7 @@ import time
 import json
 import numpy as np
 import requests
+import base64  # Added for base64 encoding of audio
 from flask import Flask, render_template_string, request, jsonify, send_from_directory
 import google.generativeai as genai
 from google.cloud import texttospeech
@@ -74,10 +75,9 @@ def load_embedder():
 
 # ===================== FLASK APP ===========================
 app = Flask(__name__)
-AUDIO_FOLDER = "static/audio"
-os.makedirs(AUDIO_FOLDER, exist_ok=True)
+# Removed AUDIO_FOLDER since no file storage
 
-# Updated HTML (unchanged from your version)
+# Updated HTML to handle base64 audio URIs
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -414,6 +414,7 @@ HTML = '''
                     aiResponseDiv.textContent = `Assistant: ${data.response}`;
                     audioPlayerDiv.innerHTML = '';
                     if (data.audio) {
+                        // data.audio is now a base64 data URI
                         audioPlayerDiv.innerHTML = `
                             <audio controls autoplay>
                                 <source src="${data.audio}" type="audio/mpeg">
@@ -525,12 +526,12 @@ def redis_search(query, threshold=0.8):
     logger.info(f"Cache miss for query '{query}'")
     return None
 
-def redis_store(query, response, audio_path=None, song_url=None):
+def redis_store(query, response, audio_base64=None, song_url=None):
     key = f"qa:{hash(query)}"
     data = {
         "query": query,
         "response": response,
-        "audio": audio_path,
+        "audio": audio_base64,  # Now stores base64 URI instead of file path
         "song_url": song_url,
         "embedding": embed(query).tolist()
     }
@@ -539,18 +540,6 @@ def redis_store(query, response, audio_path=None, song_url=None):
         logger.info(f"Stored query '{query}' in Redis with TTL 24h")
     except redis.exceptions.RedisError as e:
         logger.error(f"Failed to store in Redis: {e}")
-
-# ===================== AUDIO CLEANUP ===========================
-def cleanup_audio(max_age_hours=24):
-    import glob
-    now = time.time()
-    for file in glob.glob(os.path.join(AUDIO_FOLDER, "*.mp3")):
-        if os.path.getmtime(file) < now - (max_age_hours * 3600):
-            try:
-                os.remove(file)
-                logger.info(f"Deleted old audio file: {file}")
-            except Exception as e:
-                logger.error(f"Failed to delete audio file {file}: {str(e)}")
 
 # ===================== GEMINI RESPONSE =========================
 def gemini_response(prompt):
@@ -576,7 +565,7 @@ def gemini_response(prompt):
         return f"Unexpected error: {str(e)}", None, None
 
 # ===================== GOOGLE TTS =============================
-def synthesize_speech(text, filename=None):
+def synthesize_speech(text):
     try:
         client = texttospeech.TextToSpeechClient()
         input_text = texttospeech.SynthesisInput(text=text)
@@ -592,12 +581,11 @@ def synthesize_speech(text, filename=None):
             voice=voice,
             audio_config=audio_config
         )
-        filename = filename or f"reply_{int(time.time() * 1000)}.mp3"
-        filepath = os.path.join(AUDIO_FOLDER, filename)
-        with open(filepath, "wb") as out:
-            out.write(response.audio_content)
-        logger.info(f"Generated audio at {filepath}")
-        return f"/static/audio/{filename}"
+        # Encode audio content to base64 data URI (no file storage)
+        audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
+        audio_uri = f"data:audio/mpeg;base64,{audio_base64}"
+        logger.info(f"Generated base64 audio URI for response (length: {len(audio_base64)} chars)")
+        return audio_uri
     except gcloud_exceptions.InvalidArgument as e:
         logger.error(f"Invalid input for Google TTS: {str(e)}")
         return None
@@ -635,36 +623,34 @@ def chat():
         if cached:
             return jsonify({
                 "response": cached["response"],
-                "audio": cached["audio"],
+                "audio": cached["audio"],  # Base64 URI from cache
                 "song_url": cached.get("song_url")
             })
 
-        response, audio_path, song_url = gemini_response(prompt)
+        response, _, song_url = gemini_response(prompt)
         if response.startswith("Gemini API error") or response.startswith("Unexpected error"):
             return jsonify({"error": response}), 500
 
+        audio_base64 = None
         if not song_url:
-            audio_path = synthesize_speech(response)
-            if audio_path is None:
+            audio_base64 = synthesize_speech(response)
+            if audio_base64 is None:
                 logger.warning("No audio generated for response")
                 return jsonify({"response": response, "audio": None, "song_url": None}), 200
 
-        redis_store(prompt, response, audio_path, song_url)
-        cleanup_audio()
+        redis_store(prompt, response, audio_base64, song_url)
+        # Removed cleanup_audio() since no files are stored
 
-        return jsonify({"response": response, "audio": audio_path, "song_url": song_url})
+        return jsonify({"response": response, "audio": audio_base64, "song_url": song_url})
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 # ===================== SCHEDULE CLEANUP =======================
-def schedule_cleanup():
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(cleanup_audio, 'interval', hours=1)
-    scheduler.start()
+# Removed scheduler since no files to clean up
 
 # ===================== RUN APP ================================
 if __name__ == "__main__":
-    schedule_cleanup()
     port = int(os.getenv("PORT", 5000))
     app.run(debug=False, host="0.0.0.0", port=port)
+    
