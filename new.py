@@ -18,13 +18,13 @@ load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 REDIS_HOST = os.getenv("REDIS_HOST")
-REDIS_PORT = os.getenv("REDIS_PORT", 6379)
+REDIS_PORT = os.getenv("REDIS_PORT", 6379)  # Default to 6379, overridden by REDIS_PORT=16084
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "default")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # ===================== CONFIGURE LOGGING =====================
 logging.basicConfig(
-    level=logging.DEBUG,  # Set to DEBUG for detailed error logging
+    level=logging.DEBUG,  # DEBUG for detailed error logging
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("app.log"),
@@ -414,7 +414,7 @@ HTML = '''
                             </audio>
                         `;
                     } else {
-                        console.log("No audio received in response");
+                        console.log("No audio received in response:", data.error || "No audio generated");
                     }
                     if (data.song_url) {
                         audioPlayerDiv.innerHTML = `
@@ -597,7 +597,7 @@ def synthesize_speech(text):
     except gcloud_exceptions.PermissionDenied as e:
         logger.error(f"Permission denied for Google TTS: {str(e)}")
         return None
-    except gcloud_exceptions.QuotaExceeded as e:
+    except gcloud_exceptions.ResourceExhausted as e:
         logger.error(f"Google TTS quota exceeded: {str(e)}")
         return None
     except gcloud_exceptions.GoogleAPIError as e:
