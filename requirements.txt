@@ -12,3 +12,4 @@ python-dotenv
 google-cloud-texttospeech
 google-api-core
 google-auth
+google-generative-ai
