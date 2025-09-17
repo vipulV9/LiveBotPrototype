@@ -6,12 +6,13 @@ redis
 requests
 sentence-transformers==2.6.1
 transformers==4.40.0
-torch==2.8.0
+torch==2.8.0+cpu
 numpy
 python-dotenv
 google-cloud-texttospeech
 google-api-core
 google-auth
 
-# Use Google's index for generative AI
-google-generative-ai @ https://pypi.org/simple/google-generative-ai/
+# Add Google's index for generative AI
+--extra-index-url https://pypi.research.google.com/simple/
+google-generative-ai
