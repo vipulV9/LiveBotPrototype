@@ -25,7 +25,8 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 # ===================== CONFIGURE LOGGING =====================
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
+    format="%(asctime)s,%(msecs)d [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.FileHandler("app.log"),
         logging.StreamHandler()
@@ -38,9 +39,16 @@ if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY not set in .env")
     raise ValueError("GEMINI_API_KEY env var not set")
 
-if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
+google_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+if not google_creds:
     logger.error("GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
     raise ValueError("Set GOOGLE_APPLICATION_CREDENTIALS env var")
+try:
+    json.loads(google_creds)
+    logger.info(f"GOOGLE_APPLICATION_CREDENTIALS validated (length: {len(google_creds)} chars)")
+except json.JSONDecodeError as e:
+    logger.error(f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS: {str(e)}")
+    raise ValueError("GOOGLE_APPLICATION_CREDENTIALS must be valid JSON string")
 
 # ===================== CONFIGURE GEMINI =====================
 genai.configure(api_key=GEMINI_API_KEY)
@@ -62,7 +70,7 @@ except redis.exceptions.ConnectionError as e:
     raise
 
 # ===================== SENTENCE TRANSFORMERS =================
-embedder = None  # Lazy-load to save memory
+embedder = None
 def load_embedder():
     global embedder
     try:
@@ -75,9 +83,15 @@ def load_embedder():
 # ===================== FLASK APP ===========================
 app = Flask(__name__)
 AUDIO_FOLDER = "static/audio"
-os.makedirs(AUDIO_FOLDER, exist_ok=True)
+try:
+    os.makedirs(AUDIO_FOLDER, exist_ok=True)
+    os.chmod(AUDIO_FOLDER, 0o755)
+    logger.info(f"Created audio folder: {AUDIO_FOLDER} with permissions 755")
+except OSError as e:
+    logger.error(f"Failed to create audio folder {AUDIO_FOLDER}: {str(e)}")
+    raise
 
-# HTML (unchanged, supports URL-based audio)
+# HTML (unchanged from previous discussions)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -90,7 +104,6 @@ HTML = '''
             box-sizing: border-box;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
-
         body {
             background-color: #000;
             color: #e0e0e0;
@@ -101,13 +114,11 @@ HTML = '''
             justify-content: center;
             padding: 20px;
         }
-
         .container {
             width: 100%;
             max-width: 800px;
             text-align: center;
         }
-
         h1 {
             font-size: 2.5rem;
             margin-bottom: 2rem;
@@ -115,14 +126,12 @@ HTML = '''
             font-weight: 300;
             letter-spacing: 1px;
         }
-
         .input-section {
             display: flex;
             flex-direction: column;
             align-items: center;
             margin-bottom: 2rem;
         }
-
         .input-options {
             display: flex;
             justify-content: center;
@@ -130,13 +139,11 @@ HTML = '''
             gap: 30px;
             margin-bottom: 20px;
         }
-
         .mic-container {
             position: relative;
             width: 120px;
             height: 120px;
         }
-
         .mic-button {
             width: 120px;
             height: 120px;
@@ -151,30 +158,25 @@ HTML = '''
             transition: all 0.3s ease;
             box-shadow: 0 4px 15px rgba(0,0,0,0.5);
         }
-
         .mic-button:hover {
             background: #222;
             transform: scale(1.02);
         }
-
         .mic-button.recording {
             background: #1a1a1a;
             border-color: #555;
             animation: pulse 1.5s infinite;
         }
-
         @keyframes pulse {
             0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.2); }
             70% { box-shadow: 0 0 0 20px rgba(255, 255, 255, 0); }
             100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
         }
-
         .text-input-container {
             display: flex;
             flex-direction: column;
             align-items: center;
         }
-
         .text-input {
             width: 300px;
             padding: 12px 15px;
@@ -185,12 +187,10 @@ HTML = '''
             font-size: 1rem;
             margin-bottom: 10px;
         }
-
         .text-input:focus {
             outline: none;
             border-color: #4a90e2;
         }
-
         .send-button {
             padding: 10px 20px;
             background: #1a1a1a;
@@ -201,30 +201,25 @@ HTML = '''
             cursor: pointer;
             transition: all 0.3s ease;
         }
-
         .send-button:hover {
             background: #222;
             border-color: #555;
         }
-
         .send-button:disabled {
             opacity: 0.5;
             cursor: not-allowed;
         }
-
         .divider {
             width: 1px;
             height: 100px;
             background: #333;
         }
-
         .status {
             margin-top: 20px;
             font-size: 1.2rem;
             height: 30px;
             color: #aaa;
         }
-
         .response-container {
             background: #111;
             border: 1px solid #333;
@@ -237,14 +232,12 @@ HTML = '''
             flex-direction: column;
             justify-content: center;
         }
-
         .user-question, .ai-response {
             margin: 15px 0;
             padding: 15px;
             border-radius: 10px;
             text-align: left;
         }
-
         .user-question {
             background: #1a1a1a;
             border-left: 4px solid #4a90e2;
@@ -252,25 +245,21 @@ HTML = '''
             max-width: 80%;
             margin-left: auto;
         }
-
         .ai-response {
             background: #1a1a1a;
             border-left: 4px solid #5cb85c;
             align-self: flex-start;
             max-width: 80%;
         }
-
         .audio-player {
             margin-top: 20px;
             width: 100%;
         }
-
         .audio-player audio {
             width: 100%;
             border-radius: 10px;
             background: #1a1a1a;
         }
-
         .error {
             color: #ff6b6b;
             margin-top: 15px;
@@ -284,33 +273,26 @@ HTML = '''
 <body>
     <div class="container">
         <h1>Voice Assistant</h1>
-
         <div class="input-section">
             <div class="input-options">
                 <div class="mic-container">
                     <div id="mic-button" class="mic-button">🎤</div>
                 </div>
-
                 <div class="divider"></div>
-
                 <div class="text-input-container">
                     <input type="text" id="text-input" class="text-input" placeholder="Type your message">
                     <button id="send-button" class="send-button">Send</button>
                 </div>
             </div>
         </div>
-
         <div id="status" class="status">Choose voice or text input</div>
-
         <div id="response-container" class="response-container" style="display: none;">
             <div id="user-question" class="user-question"></div>
             <div id="ai-response" class="ai-response"></div>
             <div id="audio-player" class="audio-player"></div>
         </div>
-
         <div id="error-container" class="error" style="display: none;"></div>
     </div>
-
     <script>
         const micButton = document.getElementById('mic-button');
         const textInput = document.getElementById('text-input');
@@ -325,7 +307,6 @@ HTML = '''
         let recognizing = false;
         let recognition;
 
-        // Initialize speech recognition
         if ('webkitSpeechRecognition' in window) {
             recognition = new webkitSpeechRecognition();
         } else if ('SpeechRecognition' in window) {
@@ -336,25 +317,21 @@ HTML = '''
             recognition.continuous = false;
             recognition.interimResults = false;
             recognition.lang = 'en-US';
-
             recognition.onstart = function() {
                 recognizing = true;
                 micButton.classList.add('recording');
                 statusDiv.textContent = 'Listening... Speak now';
                 errorContainer.style.display = 'none';
             };
-
             recognition.onend = function() {
                 recognizing = false;
                 micButton.classList.remove('recording');
                 statusDiv.textContent = 'Processing...';
             };
-
             recognition.onresult = function(event) {
                 const transcript = event.results[0][0].transcript;
                 processUserInput(transcript);
             };
-
             recognition.onerror = function(event) {
                 recognizing = false;
                 micButton.classList.remove('recording');
@@ -364,7 +341,6 @@ HTML = '''
             showError('Browser does not support SpeechRecognition API.');
         }
 
-        // Microphone button click
         micButton.onclick = function() {
             if (recognizing) {
                 recognition.stop();
@@ -374,7 +350,6 @@ HTML = '''
             }
         };
 
-        // Send button click
         sendButton.onclick = function() {
             const text = textInput.value.trim();
             if (text) {
@@ -383,7 +358,6 @@ HTML = '''
             }
         };
 
-        // Enter key in text input
         textInput.addEventListener('keydown', function(e) {
             if (e.key === 'Enter') {
                 sendButton.click();
@@ -393,8 +367,6 @@ HTML = '''
         function processUserInput(input) {
             userQuestionDiv.textContent = `You: ${input}`;
             statusDiv.textContent = 'Getting response...';
-
-            // Send to server for processing
             fetch("/chat", {
                 method: "POST",
                 headers: {"Content-Type": "application/json"},
@@ -514,7 +486,6 @@ def redis_search(query, threshold=0.8):
         logger.error(f"Redis search error: {e}")
         return None
     if best_match and best_score >= threshold:
-        # Check if audio file exists
         audio_path = best_match.get("audio")
         if audio_path and not os.path.exists(audio_path.lstrip('/')):
             logger.warning(f"Cached audio file {audio_path} missing, ignoring cache")
@@ -573,7 +544,21 @@ def gemini_response(prompt):
 # ===================== GOOGLE TTS =============================
 def synthesize_speech(text, filename=None):
     try:
-        client = texttospeech.TextToSpeechClient()
+        if not text or len(text.strip()) == 0:
+            logger.error("Empty text provided to Google TTS")
+            return None
+        if len(text) > 5000:
+            logger.warning(f"Text too long for Google TTS ({len(text)} chars); truncating")
+            text = text[:5000]
+
+        logger.info(f"Synthesizing speech for text (length: {len(text)}): {text[:50]}...")
+        try:
+            client = texttospeech.TextToSpeechClient()
+            logger.info("Google TTS client initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Google TTS client: {str(e)}", exc_info=True)
+            return None
+
         input_text = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
             language_code="en-US",
@@ -582,32 +567,54 @@ def synthesize_speech(text, filename=None):
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.MP3
         )
-        response = client.synthesize_speech(
-            input=input_text,
-            voice=voice,
-            audio_config=audio_config
-        )
+        logger.info("Sending request to Google TTS API")
+        try:
+            response = client.synthesize_speech(
+                input=input_text,
+                voice=voice,
+                audio_config=audio_config
+            )
+            logger.info(f"Received TTS response (audio content length: {len(response.audio_content)} bytes)")
+        except Exception as e:
+            logger.error(f"Google TTS API call failed: {str(e)}", exc_info=True)
+            return None
+
+        if len(response.audio_content) == 0:
+            logger.error("Google TTS returned empty audio content")
+            return None
+
         filename = filename or f"reply_{int(time.time() * 1000)}.mp3"
         filepath = os.path.join(AUDIO_FOLDER, filename)
-        with open(filepath, "wb") as out:
-            out.write(response.audio_content)
-        if os.path.exists(filepath):
-            logger.info(f"Generated audio at {filepath}")
-            return f"/{filepath}"
-        else:
-            logger.error(f"Failed to write audio file at {filepath}")
+        logger.info(f"Writing audio to {filepath}")
+        try:
+            with open(filepath, "wb") as out:
+                out.write(response.audio_content)
+                out.flush()
+                os.fsync(out.fileno())
+            if os.path.exists(filepath):
+                file_size = os.path.getsize(filepath)
+                logger.info(f"Generated audio at {filepath} (size: {file_size} bytes)")
+                return f"/static/audio/{filename}"
+            else:
+                logger.error(f"File existence check failed for {filepath}")
+                return None
+        except IOError as e:
+            logger.error(f"File I/O error writing audio to {filepath}: {str(e)}")
             return None
     except gcloud_exceptions.InvalidArgument as e:
         logger.error(f"Invalid input for Google TTS: {str(e)}")
         return None
     except gcloud_exceptions.PermissionDenied as e:
-        logger.error(f"Permission denied for Google TTS: {str(e)}")
+        logger.error(f"Permission denied for Google TTS (check GOOGLE_APPLICATION_CREDENTIALS): {str(e)}")
+        return None
+    except gcloud_exceptions.QuotaExceeded as e:
+        logger.error(f"Google TTS quota exceeded: {str(e)}")
         return None
     except gcloud_exceptions.GoogleAPIError as e:
-        logger.error(f"Google TTS error: {str(e)}")
+        logger.error(f"Google TTS API error: {str(e)}", exc_info=True)
         return None
     except Exception as e:
-        logger.error(f"Unexpected error in Google TTS: {str(e)}")
+        logger.error(f"Unexpected error in Google TTS: {str(e)}", exc_info=True)
         return None
 
 # ===================== FLASK ROUTES ============================
@@ -628,20 +635,26 @@ def chat():
         data = request.json
         prompt = data.get("prompt", "").strip()
         if not prompt:
+            logger.error("No prompt provided in request")
             return jsonify({"error": "No prompt provided"}), 400
 
         cached = redis_search(prompt)
         if cached:
+            logger.info(f"Returning cached response for prompt: {prompt}")
             return jsonify({
                 "response": cached["response"],
                 "audio": cached["audio"],
                 "song_url": cached.get("song_url")
             })
 
-        response, audio_path, song_url = gemini_response(prompt)
+        response, _, song_url = gemini_response(prompt)
         if response.startswith("Gemini API error"):
+            logger.error(f"Gemini response error: {response}")
             return jsonify({"error": response}), 500
 
+        logger.info(f"Gemini response for '{prompt}' (length: {len(response)}): {response[:50]}...")
+
+        audio_path = None
         if not song_url:
             audio_path = synthesize_speech(response)
             if audio_path is None:
@@ -651,10 +664,27 @@ def chat():
         redis_store(prompt, response, audio_path, song_url)
         cleanup_audio()
 
+        logger.info(f"Returning new response for prompt: {prompt}")
         return jsonify({"response": response, "audio": audio_path, "song_url": song_url})
     except Exception as e:
-        logger.error(f"Server error: {str(e)}")
+        logger.error(f"Server error in /chat: {str(e)}", exc_info=True)
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+@app.route("/test_tts", methods=["POST"])
+def test_tts():
+    try:
+        data = request.json
+        text = data.get("text", "Hello, this is a test.")
+        audio_path = synthesize_speech(text)
+        if audio_path:
+            logger.info(f"Test TTS successful, audio at {audio_path}")
+            return jsonify({"audio": audio_path})
+        else:
+            logger.error("Test TTS failed to generate audio")
+            return jsonify({"error": "Failed to generate audio"}), 500
+    except Exception as e:
+        logger.error(f"Test TTS error: {str(e)}", exc_info=True)
+        return jsonify({"error": f"Test TTS error: {str(e)}"}), 500
 
 # ===================== RUN APP ================================
 if __name__ == "__main__":
