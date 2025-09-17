@@ -1,5 +1,3 @@
---extra-index-url https://download.pytorch.org/whl/cpu
---extra-index-url https://pypi.org/simple
 Flask
 gunicorn
 redis
@@ -12,4 +10,5 @@ python-dotenv
 google-cloud-texttospeech
 google-api-core
 google-auth
-google-generative-ai
+google-generativeai
+--extra-index-url https://download.pytorch.org/whl/cpu
