@@ -18,7 +18,7 @@ load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 REDIS_HOST = os.getenv("REDIS_HOST")
-REDIS_PORT = os.getenv("REDIS_PORT", 6379)  # Default to 6379, overridden by REDIS_PORT=16084
+REDIS_PORT = os.getenv("REDIS_PORT", 6379)  # Default 6379, overridden by REDIS_PORT=16084
 REDIS_USERNAME = os.getenv("REDIS_USERNAME", "default")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
@@ -75,7 +75,7 @@ def load_embedder():
 # ===================== FLASK APP ===========================
 app = Flask(__name__)
 
-# HTML (unchanged, supports base64 audio URIs)
+# HTML (enhanced with better error logging)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -368,6 +368,7 @@ HTML = '''
                 recognition.stop();
             } else {
                 responseContainer.style.display = 'none';
+                errorContainer.style.display = 'none';
                 recognition.start();
             }
         };
@@ -391,6 +392,8 @@ HTML = '''
         function processUserInput(input) {
             userQuestionDiv.textContent = `You: ${input}`;
             statusDiv.textContent = 'Getting response...';
+            responseContainer.style.display = 'none';
+            errorContainer.style.display = 'none';
 
             // Send to server for processing
             fetch("/chat", {
@@ -398,15 +401,19 @@ HTML = '''
                 headers: {"Content-Type": "application/json"},
                 body: JSON.stringify({"prompt": input})
             })
-            .then(response => response.json())
+            .then(response => {
+                console.log("Server response status:", response.status);
+                return response.json();
+            })
             .then(data => {
+                console.log("Received server response:", data);
                 if (data.error) {
                     showError(data.error);
                 } else {
-                    aiResponseDiv.textContent = `Assistant: ${data.response}`;
+                    aiResponseDiv.textContent = `Assistant: ${data.response || 'No response text provided'}`;
                     audioPlayerDiv.innerHTML = '';
                     if (data.audio) {
-                        console.log("Received audio URI:", data.audio.substring(0, 50) + "..."); // Debug audio URI
+                        console.log("Received audio URI:", data.audio.substring(0, 50) + "...");
                         audioPlayerDiv.innerHTML = `
                             <audio controls autoplay>
                                 <source src="${data.audio}" type="audio/mpeg">
@@ -414,9 +421,10 @@ HTML = '''
                             </audio>
                         `;
                     } else {
-                        console.log("No audio received in response:", data.error || "No audio generated");
+                        console.log("No audio received:", data.error || "No audio generated");
                     }
                     if (data.song_url) {
+                        console.log("Received song URL:", data.song_url);
                         audioPlayerDiv.innerHTML = `
                             <audio controls autoplay>
                                 <source src="${data.song_url}" type="audio/mpeg">
@@ -429,11 +437,13 @@ HTML = '''
                 }
             })
             .catch(error => {
-                showError(`Error: ${error}`);
+                console.error("Fetch error:", error);
+                showError(`Fetch error: ${error.message}`);
             });
         }
 
         function showError(message) {
+            console.error("Error displayed:", message);
             statusDiv.textContent = 'Error occurred';
             errorContainer.textContent = message;
             errorContainer.style.display = 'block';
@@ -566,9 +576,9 @@ def synthesize_speech(text):
         if not text or len(text.strip()) == 0:
             logger.error("Empty or invalid text input for TTS")
             return None
-        # Sanitize text: limit length and remove special characters
-        text = text[:200]  # Limit to 200 chars to reduce audio size
-        text = ''.join(c for c in text if c.isprintable())  # Remove non-printable chars
+        # Sanitize text: limit length and remove problematic characters
+        text = text[:200]  # Limit to 200 chars
+        text = ''.join(c for c in text if c.isalnum() or c.isspace())  # Keep only alphanumeric and spaces
         if not text:
             logger.error("Text is empty after sanitization")
             return None
@@ -622,7 +632,10 @@ def favicon():
 @app.route("/chat", methods=["POST"])
 def chat():
     try:
-        data = request.json
+        data = request.get_json(silent=True)
+        if not data:
+            logger.error("Invalid JSON in request")
+            return jsonify({"error": "Invalid JSON in request"}), 400
         prompt = data.get("prompt", "").strip()
         if not prompt:
             logger.error("No prompt provided in request")
