@@ -11,11 +11,15 @@ import redis
 import logging
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # ===================== LOAD ENV VARIABLES =====================
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = os.getenv("REDIS_PORT", 6379)
+REDIS_USERNAME = os.getenv("REDIS_USERNAME", "default")
 REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # ===================== CONFIGURE LOGGING =====================
@@ -42,14 +46,10 @@ if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
     raise ValueError("Set GOOGLE_APPLICATION_CREDENTIALS env var")
 
 # ===================== REDIS ================================
-REDIS_HOST = "redis-16084.c52.us-east-1-4.ec2.redns.redis-cloud.com"
-REDIS_PORT = 16084
-REDIS_USERNAME = "default"
-
 try:
     r = redis.Redis(
         host=REDIS_HOST,
-        port=REDIS_PORT,
+        port=int(REDIS_PORT),
         username=REDIS_USERNAME,
         password=REDIS_PASSWORD,
         db=0,
@@ -62,19 +62,22 @@ except redis.exceptions.ConnectionError as e:
     raise
 
 # ===================== SENTENCE TRANSFORMERS =================
-try:
-    embedder = SentenceTransformer('all-MiniLM-L6-v2')
-    logger.info("Initialized SentenceTransformer model 'all-MiniLM-L6-v2'")
-except Exception as e:
-    logger.error(f"Failed to load SentenceTransformer: {e}")
-    embedder = None
+embedder = None  # Lazy-load to save memory
+def load_embedder():
+    global embedder
+    try:
+        embedder = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("Initialized SentenceTransformer model 'all-MiniLM-L6-v2'")
+    except Exception as e:
+        logger.error(f"Failed to load SentenceTransformer: {e}")
+        embedder = None
 
 # ===================== FLASK APP ===========================
 app = Flask(__name__)
 AUDIO_FOLDER = "static/audio"
 os.makedirs(AUDIO_FOLDER, exist_ok=True)
 
-# Updated HTML to handle song playback
+# Updated HTML (unchanged from your version)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -451,7 +454,7 @@ def search_jiosaavn_song(query):
     try:
         url = "https://saavn.dev/api/search/songs"
         params = {"query": query, "limit": 1}
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=10)
         response.raise_for_status()
         data = response.json()
         if data.get("success") and data.get("data", {}).get("results"):
@@ -472,22 +475,18 @@ def search_jiosaavn_song(query):
         return None, None
 
 # ===================== EMBEDDINGS & COSINE SIM ===================
-embedder = None  
-
 def embed(text):
     global embedder
     if embedder is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            embedder = SentenceTransformer('all-MiniLM-L6-v2')
-            logger.info("SentenceTransformer loaded")
-        except Exception as e:
-            logger.error(f"Failed to load SentenceTransformer: {e}")
-            embedder = None
-    if embedder:
-        return embedder.encode(text, convert_to_numpy=True)
-    else:
-        # fallback
+        load_embedder()
+    try:
+        if embedder is None:
+            raise ValueError("SentenceTransformer not initialized")
+        embedding = embedder.encode(text, convert_to_numpy=True)
+        logger.debug(f"Generated embedding for text: {text}")
+        return embedding
+    except Exception as e:
+        logger.error(f"Embedding error: {str(e)}")
         return np.array([ord(c) % 50 for c in text[:100]], dtype=float)
 
 def cosine_similarity(vec1, vec2):
@@ -497,15 +496,17 @@ def cosine_similarity(vec1, vec2):
     norm1 = np.linalg.norm(vec1)
     norm2 = np.linalg.norm(vec2)
     if norm1 == 0 or norm2 == 0:
+        logger.warning("Zero vector in cosine similarity")
         return 0.0
-    return np.dot(vec1, vec2) / (norm1 * norm2)
+    score = np.dot(vec1, vec2) / (norm1 * norm2)
+    logger.debug(f"Cosine similarity score: {score}")
+    return score
 
 # ===================== REDIS HELPERS ===========================
 def redis_search(query, threshold=0.8):
     query_vec = embed(query)
     best_match = None
     best_score = 0
-
     try:
         for key in r.scan_iter("qa:*"):
             data = json.loads(r.get(key))
@@ -518,7 +519,6 @@ def redis_search(query, threshold=0.8):
     except redis.exceptions.RedisError as e:
         logger.error(f"Redis search error: {e}")
         return None
-
     if best_match and best_score >= threshold:
         logger.info(f"Cache hit for query '{query}' with score {best_score}")
         return best_match
@@ -546,13 +546,15 @@ def cleanup_audio(max_age_hours=24):
     now = time.time()
     for file in glob.glob(os.path.join(AUDIO_FOLDER, "*.mp3")):
         if os.path.getmtime(file) < now - (max_age_hours * 3600):
-            os.remove(file)
-            logger.info(f"Deleted old audio file: {file}")
+            try:
+                os.remove(file)
+                logger.info(f"Deleted old audio file: {file}")
+            except Exception as e:
+                logger.error(f"Failed to delete audio file {file}: {str(e)}")
 
 # ===================== GEMINI RESPONSE =========================
 def gemini_response(prompt):
     try:
-        # Check if the prompt is a song playback request
         prompt_lower = prompt.lower()
         if any(keyword in prompt_lower for keyword in ["play", "song", "music"]):
             song_name, song_url = search_jiosaavn_song(prompt)
@@ -562,15 +564,16 @@ def gemini_response(prompt):
                 return f"Found song '{song_name}' but no playable URL available", None, None
             else:
                 return "Sorry, I couldn't find that song", None, None
-
-        # Fallback to Gemini for non-song queries
         model = genai.GenerativeModel("gemini-1.5-flash-8b")
         response = model.generate_content(prompt)
         logger.info(f"Gemini generated response for prompt '{prompt}'")
         return response.text.strip().replace("\n", " "), None, None
-    except Exception as e:
+    except genai.exceptions.GoogleAPIError as e:
         logger.error(f"Gemini API error: {str(e)}")
         return f"Gemini API error: {str(e)}", None, None
+    except Exception as e:
+        logger.error(f"Unexpected error in Gemini response: {str(e)}")
+        return f"Unexpected error: {str(e)}", None, None
 
 # ===================== GOOGLE TTS =============================
 def synthesize_speech(text, filename=None):
@@ -595,8 +598,17 @@ def synthesize_speech(text, filename=None):
             out.write(response.audio_content)
         logger.info(f"Generated audio at {filepath}")
         return f"/static/audio/{filename}"
-    except gcloud_exceptions.GoogleCloudError as e:
+    except gcloud_exceptions.InvalidArgument as e:
+        logger.error(f"Invalid input for Google TTS: {str(e)}")
+        return None
+    except gcloud_exceptions.PermissionDenied as e:
+        logger.error(f"Permission denied for Google TTS: {str(e)}")
+        return None
+    except gcloud_exceptions.GoogleAPIError as e:
         logger.error(f"Google TTS error: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in Google TTS: {str(e)}")
         return None
 
 # ===================== FLASK ROUTES ============================
@@ -628,12 +640,13 @@ def chat():
             })
 
         response, audio_path, song_url = gemini_response(prompt)
-        if response.startswith("Gemini API error"):
+        if response.startswith("Gemini API error") or response.startswith("Unexpected error"):
             return jsonify({"error": response}), 500
 
         if not song_url:
             audio_path = synthesize_speech(response)
             if audio_path is None:
+                logger.warning("No audio generated for response")
                 return jsonify({"response": response, "audio": None, "song_url": None}), 200
 
         redis_store(prompt, response, audio_path, song_url)
@@ -644,6 +657,14 @@ def chat():
         logger.error(f"Server error: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
+# ===================== SCHEDULE CLEANUP =======================
+def schedule_cleanup():
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(cleanup_audio, 'interval', hours=1)
+    scheduler.start()
+
 # ===================== RUN APP ================================
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    schedule_cleanup()
+    port = int(os.getenv("PORT", 5000))
+    app.run(debug=False, host="0.0.0.0", port=port)
