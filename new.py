@@ -4,6 +4,7 @@ import json
 import glob
 import numpy as np
 import requests
+import tempfile
 from flask import Flask, render_template_string, request, jsonify, send_from_directory
 import google.generativeai as genai
 from google.cloud import texttospeech
@@ -40,6 +41,7 @@ if not GEMINI_API_KEY:
     raise ValueError("GEMINI_API_KEY env var not set")
 
 # ===================== GOOGLE CREDENTIALS FIX =====================
+# ===================== GOOGLE CREDENTIALS FIX =====================
 google_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if not google_creds:
     logger.error("GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
@@ -54,19 +56,18 @@ try:
         logger.error(f"GOOGLE_APPLICATION_CREDENTIALS missing required fields: {missing_fields}")
         raise ValueError(f"GOOGLE_APPLICATION_CREDENTIALS missing fields: {missing_fields}")
 
-
     import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".json") as temp:
+    # ✅ FIX: open in text mode with UTF-8 encoding
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as temp:
         json.dump(creds_dict, temp)
         temp_path = temp.name
 
-
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = temp_path
-
     logger.info(f"Google credentials validated (client_email: {creds_dict['client_email']}, project_id: {creds_dict['project_id']})")
 except json.JSONDecodeError:
     logger.error("Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS")
     raise ValueError("GOOGLE_APPLICATION_CREDENTIALS must be valid JSON string")
+
 
 
 # ===================== CONFIGURE GEMINI =====================
