@@ -44,8 +44,13 @@ if not google_creds:
     logger.error("GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
     raise ValueError("Set GOOGLE_APPLICATION_CREDENTIALS env var")
 try:
-    json.loads(google_creds)
-    logger.info(f"GOOGLE_APPLICATION_CREDENTIALS validated (length: {len(google_creds)} chars)")
+    creds_dict = json.loads(google_creds)
+    required_fields = ["type", "project_id", "private_key", "client_email", "client_id", "auth_uri", "token_uri"]
+    missing_fields = [field for field in required_fields if field not in creds_dict]
+    if missing_fields:
+        logger.error(f"GOOGLE_APPLICATION_CREDENTIALS missing required fields: {missing_fields}")
+        raise ValueError(f"GOOGLE_APPLICATION_CREDENTIALS missing fields: {missing_fields}")
+    logger.info(f"GOOGLE_APPLICATION_CREDENTIALS validated (client_email: {creds_dict['client_email']}, project_id: {creds_dict['project_id']})")
 except json.JSONDecodeError as e:
     logger.error(f"Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS: {str(e)}")
     raise ValueError("GOOGLE_APPLICATION_CREDENTIALS must be valid JSON string")
