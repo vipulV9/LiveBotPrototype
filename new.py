@@ -472,31 +472,33 @@ def search_jiosaavn_song(query):
         return None, None
 
 # ===================== EMBEDDINGS & COSINE SIM ===================
+embedder = None  
+
 def embed(text):
-    try:
-        if embedder is None:
-            raise ValueError("SentenceTransformer not initialized")
-        embedding = embedder.encode(text, convert_to_numpy=True)
-        logger.debug(f"Generated embedding for text: {text}")
-        return embedding
-    except Exception as e:
-        logger.error(f"Embedding error: {str(e)}")
+    global embedder
+    if embedder is None:
+        try:
+            from sentence_transformers import SentenceTransformer
+            embedder = SentenceTransformer('all-MiniLM-L6-v2')
+            logger.info("SentenceTransformer loaded")
+        except Exception as e:
+            logger.error(f"Failed to load SentenceTransformer: {e}")
+            embedder = None
+    if embedder:
+        return embedder.encode(text, convert_to_numpy=True)
+    else:
+        # fallback
         return np.array([ord(c) % 50 for c in text[:100]], dtype=float)
 
 def cosine_similarity(vec1, vec2):
     max_len = max(len(vec1), len(vec2))
     vec1 = np.pad(vec1, (0, max_len - len(vec1)), mode='constant')
     vec2 = np.pad(vec2, (0, max_len - len(vec2)), mode='constant')
-
     norm1 = np.linalg.norm(vec1)
     norm2 = np.linalg.norm(vec2)
     if norm1 == 0 or norm2 == 0:
-        logger.warning("Zero vector in cosine similarity")
         return 0.0
-
-    score = np.dot(vec1, vec2) / (norm1 * norm2)
-    logger.debug(f"Cosine similarity score: {score}")
-    return score
+    return np.dot(vec1, vec2) / (norm1 * norm2)
 
 # ===================== REDIS HELPERS ===========================
 def redis_search(query, threshold=0.8):
