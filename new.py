@@ -24,7 +24,7 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
 
 # ===================== CONFIGURE LOGGING =====================
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Set to DEBUG for detailed error logging
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
         logging.FileHandler("app.log"),
@@ -75,7 +75,7 @@ def load_embedder():
 # ===================== FLASK APP ===========================
 app = Flask(__name__)
 
-# HTML (supports base64 audio URIs)
+# HTML (unchanged, supports base64 audio URIs)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -147,7 +147,7 @@ HTML = '''
             font-size: 3rem;
             cursor: pointer;
             transition: all 0.3s ease;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
         }
 
         .mic-button:hover {
@@ -406,12 +406,15 @@ HTML = '''
                     aiResponseDiv.textContent = `Assistant: ${data.response}`;
                     audioPlayerDiv.innerHTML = '';
                     if (data.audio) {
+                        console.log("Received audio URI:", data.audio.substring(0, 50) + "..."); // Debug audio URI
                         audioPlayerDiv.innerHTML = `
                             <audio controls autoplay>
                                 <source src="${data.audio}" type="audio/mpeg">
                                 Your browser does not support the audio element.
                             </audio>
                         `;
+                    } else {
+                        console.log("No audio received in response");
                     }
                     if (data.song_url) {
                         audioPlayerDiv.innerHTML = `
@@ -475,7 +478,7 @@ def embed(text):
         if embedder is None:
             raise ValueError("SentenceTransformer not initialized")
         embedding = embedder.encode(text, convert_to_numpy=True)
-        logger.debug(f"Generated embedding for text: {text}")
+        logger.debug(f"Generated embedding for text: {text[:50]}...")
         return embedding
     except Exception as e:
         logger.error(f"Embedding error: {str(e)}")
@@ -545,9 +548,11 @@ def gemini_response(prompt):
             else:
                 return "Sorry, I couldn't find that song", None, None
         model = genai.GenerativeModel("gemini-1.5-flash-8b")
-        response = model.generate_content(prompt)
-        logger.info(f"Gemini generated response for prompt '{prompt}'")
-        return response.text.strip().replace("\n", " "), None, None
+        # Request concise responses to reduce audio size
+        response = model.generate_content(f"{prompt}\nPlease keep the response short (under 50 words).")
+        response_text = response.text.strip().replace("\n", " ")
+        logger.info(f"Gemini generated response for prompt '{prompt}': {response_text[:50]}...")
+        return response_text, None, None
     except genai.exceptions.GoogleAPIError as e:
         logger.error(f"Gemini API error: {str(e)}")
         return f"Gemini API error: {str(e)}", None, None
@@ -558,6 +563,16 @@ def gemini_response(prompt):
 # ===================== GOOGLE TTS =============================
 def synthesize_speech(text):
     try:
+        if not text or len(text.strip()) == 0:
+            logger.error("Empty or invalid text input for TTS")
+            return None
+        # Sanitize text: limit length and remove special characters
+        text = text[:200]  # Limit to 200 chars to reduce audio size
+        text = ''.join(c for c in text if c.isprintable())  # Remove non-printable chars
+        if not text:
+            logger.error("Text is empty after sanitization")
+            return None
+        logger.debug(f"Calling Google TTS with text: {text[:50]}...")
         client = texttospeech.TextToSpeechClient()
         input_text = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
@@ -574,7 +589,7 @@ def synthesize_speech(text):
         )
         audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
         audio_uri = f"data:audio/mpeg;base64,{audio_base64}"
-        logger.info(f"Generated base64 audio URI for response (length: {len(audio_base64)} chars)")
+        logger.info(f"Generated base64 audio URI (length: {len(audio_base64)} chars)")
         return audio_uri
     except gcloud_exceptions.InvalidArgument as e:
         logger.error(f"Invalid input for Google TTS: {str(e)}")
@@ -582,11 +597,14 @@ def synthesize_speech(text):
     except gcloud_exceptions.PermissionDenied as e:
         logger.error(f"Permission denied for Google TTS: {str(e)}")
         return None
+    except gcloud_exceptions.QuotaExceeded as e:
+        logger.error(f"Google TTS quota exceeded: {str(e)}")
+        return None
     except gcloud_exceptions.GoogleAPIError as e:
-        logger.error(f"Google TTS error: {str(e)}")
+        logger.error(f"Google TTS API error: {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"Unexpected error in Google TTS: {str(e)}")
+        logger.error(f"Unexpected error in Google TTS: {str(e)}", exc_info=True)
         return None
 
 # ===================== FLASK ROUTES ============================
@@ -607,10 +625,13 @@ def chat():
         data = request.json
         prompt = data.get("prompt", "").strip()
         if not prompt:
+            logger.error("No prompt provided in request")
             return jsonify({"error": "No prompt provided"}), 400
 
+        logger.debug(f"Processing prompt: {prompt}")
         cached = redis_search(prompt)
         if cached:
+            logger.info(f"Returning cached response for prompt: {prompt}")
             return jsonify({
                 "response": cached["response"],
                 "audio": cached["audio"],
@@ -619,20 +640,26 @@ def chat():
 
         response, _, song_url = gemini_response(prompt)
         if response.startswith("Gemini API error") or response.startswith("Unexpected error"):
+            logger.error(f"Gemini response error: {response}")
             return jsonify({"error": response}), 500
 
         audio_base64 = None
         if not song_url:
             audio_base64 = synthesize_speech(response)
             if audio_base64 is None:
-                logger.warning("No audio generated for response")
-                return jsonify({"response": response, "audio": None, "song_url": None}), 200
+                logger.warning(f"No audio generated for response: {response[:50]}...")
+                return jsonify({
+                    "response": response,
+                    "audio": None,
+                    "song_url": None,
+                    "error": "Failed to generate audio, displaying text only"
+                }), 200
 
         redis_store(prompt, response, audio_base64, song_url)
-
+        logger.info(f"Returning new response for prompt: {prompt}")
         return jsonify({"response": response, "audio": audio_base64, "song_url": song_url})
     except Exception as e:
-        logger.error(f"Server error: {str(e)}")
+        logger.error(f"Server error in /chat: {str(e)}", exc_info=True)
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 # ===================== RUN APP ================================
