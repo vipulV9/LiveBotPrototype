@@ -13,6 +13,5 @@ google-cloud-texttospeech
 google-api-core
 google-auth
 
-# Add Google's index for generative AI
---extra-index-url https://pypi.research.google.com/simple/
+--extra-index-url https://pypi.org/simple
 google-generative-ai
