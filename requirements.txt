@@ -1,10 +1,12 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 Flask
 gunicorn
 redis
 requests
 sentence-transformers==2.6.1
 transformers==4.40.0
-torch==2.8.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
+torch==2.8.0
 numpy
 python-dotenv
 google-cloud-texttospeech
