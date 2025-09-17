@@ -1,9 +1,9 @@
 import os
 import time
 import json
+import glob
 import numpy as np
 import requests
-import base64
 from flask import Flask, render_template_string, request, jsonify, send_from_directory
 import google.generativeai as genai
 from google.cloud import texttospeech
@@ -33,17 +33,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ===================== CONFIGURE GEMINI =====================
+# ===================== VALIDATE ENV VARIABLES =================
 if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY not set in .env")
     raise ValueError("GEMINI_API_KEY env var not set")
 
-genai.configure(api_key=GEMINI_API_KEY)
-
-# ===================== CONFIGURE GOOGLE TTS =================
 if not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
     logger.error("GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
     raise ValueError("Set GOOGLE_APPLICATION_CREDENTIALS env var")
+
+# ===================== CONFIGURE GEMINI =====================
+genai.configure(api_key=GEMINI_API_KEY)
 
 # ===================== REDIS ================================
 try:
@@ -74,8 +74,10 @@ def load_embedder():
 
 # ===================== FLASK APP ===========================
 app = Flask(__name__)
+AUDIO_FOLDER = "static/audio"
+os.makedirs(AUDIO_FOLDER, exist_ok=True)
 
-# HTML (supports base64 audio URIs)
+# HTML (same as your local version, supports URL-based audio)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -512,17 +514,22 @@ def redis_search(query, threshold=0.8):
         logger.error(f"Redis search error: {e}")
         return None
     if best_match and best_score >= threshold:
+        # Check if audio file exists
+        audio_path = best_match.get("audio")
+        if audio_path and not os.path.exists(audio_path.lstrip('/')):
+            logger.warning(f"Cached audio file {audio_path} missing, ignoring cache")
+            return None
         logger.info(f"Cache hit for query '{query}' with score {best_score}")
         return best_match
     logger.info(f"Cache miss for query '{query}'")
     return None
 
-def redis_store(query, response, audio_base64=None, song_url=None):
+def redis_store(query, response, audio_path=None, song_url=None):
     key = f"qa:{hash(query)}"
     data = {
         "query": query,
         "response": response,
-        "audio": audio_base64,
+        "audio": audio_path,
         "song_url": song_url,
         "embedding": embed(query).tolist()
     }
@@ -531,6 +538,17 @@ def redis_store(query, response, audio_base64=None, song_url=None):
         logger.info(f"Stored query '{query}' in Redis with TTL 24h")
     except redis.exceptions.RedisError as e:
         logger.error(f"Failed to store in Redis: {e}")
+
+# ===================== AUDIO CLEANUP ===========================
+def cleanup_audio(max_age_hours=24):
+    now = time.time()
+    for file in glob.glob(os.path.join(AUDIO_FOLDER, "*.mp3")):
+        if os.path.getmtime(file) < now - (max_age_hours * 3600):
+            try:
+                os.remove(file)
+                logger.info(f"Deleted old audio file: {file}")
+            except Exception as e:
+                logger.error(f"Failed to delete audio file {file}: {str(e)}")
 
 # ===================== GEMINI RESPONSE =========================
 def gemini_response(prompt):
@@ -548,15 +566,12 @@ def gemini_response(prompt):
         response = model.generate_content(prompt)
         logger.info(f"Gemini generated response for prompt '{prompt}'")
         return response.text.strip().replace("\n", " "), None, None
-    except genai.exceptions.GoogleAPIError as e:
+    except Exception as e:
         logger.error(f"Gemini API error: {str(e)}")
         return f"Gemini API error: {str(e)}", None, None
-    except Exception as e:
-        logger.error(f"Unexpected error in Gemini response: {str(e)}")
-        return f"Unexpected error: {str(e)}", None, None
 
 # ===================== GOOGLE TTS =============================
-def synthesize_speech(text):
+def synthesize_speech(text, filename=None):
     try:
         client = texttospeech.TextToSpeechClient()
         input_text = texttospeech.SynthesisInput(text=text)
@@ -572,21 +587,14 @@ def synthesize_speech(text):
             voice=voice,
             audio_config=audio_config
         )
-        audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
-        audio_uri = f"data:audio/mpeg;base64,{audio_base64}"
-        logger.info(f"Generated base64 audio URI for response (length: {len(audio_base64)} chars)")
-        return audio_uri
-    except gcloud_exceptions.InvalidArgument as e:
-        logger.error(f"Invalid input for Google TTS: {str(e)}")
-        return None
-    except gcloud_exceptions.PermissionDenied as e:
-        logger.error(f"Permission denied for Google TTS: {str(e)}")
-        return None
-    except gcloud_exceptions.GoogleAPIError as e:
+        filename = filename or f"reply_{int(time.time() * 1000)}.mp3"
+        filepath = os.path.join(AUDIO_FOLDER, filename)
+        with open(filepath, "wb") as out:
+            out.write(response.audio_content)
+        logger.info(f"Generated audio at {filepath}")
+        return f"/{filepath}"
+    except gcloud_exceptions.GoogleCloudError as e:
         logger.error(f"Google TTS error: {str(e)}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error in Google TTS: {str(e)}")
         return None
 
 # ===================== FLASK ROUTES ============================
@@ -617,20 +625,19 @@ def chat():
                 "song_url": cached.get("song_url")
             })
 
-        response, _, song_url = gemini_response(prompt)
-        if response.startswith("Gemini API error") or response.startswith("Unexpected error"):
+        response, audio_path, song_url = gemini_response(prompt)
+        if response.startswith("Gemini API error"):
             return jsonify({"error": response}), 500
 
-        audio_base64 = None
         if not song_url:
-            audio_base64 = synthesize_speech(response)
-            if audio_base64 is None:
-                logger.warning("No audio generated for response")
+            audio_path = synthesize_speech(response)
+            if audio_path is None:
                 return jsonify({"response": response, "audio": None, "song_url": None}), 200
 
-        redis_store(prompt, response, audio_base64, song_url)
+        redis_store(prompt, response, audio_path, song_url)
+        cleanup_audio()
 
-        return jsonify({"response": response, "audio": audio_base64, "song_url": song_url})
+        return jsonify({"response": response, "audio": audio_path, "song_url": song_url})
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
