@@ -1,0 +1,10 @@
+Flask
+gunicorn
+redis
+requests
+sentence-transformers
+numpy
+python-dotenv
+google-cloud-texttospeech
+google-api-core
+google-auth
