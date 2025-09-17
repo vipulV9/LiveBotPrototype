@@ -77,7 +77,7 @@ app = Flask(__name__)
 AUDIO_FOLDER = "static/audio"
 os.makedirs(AUDIO_FOLDER, exist_ok=True)
 
-# HTML (same as your local version, supports URL-based audio)
+# HTML (unchanged, supports URL-based audio)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -591,10 +591,23 @@ def synthesize_speech(text, filename=None):
         filepath = os.path.join(AUDIO_FOLDER, filename)
         with open(filepath, "wb") as out:
             out.write(response.audio_content)
-        logger.info(f"Generated audio at {filepath}")
-        return f"/{filepath}"
-    except gcloud_exceptions.GoogleCloudError as e:
+        if os.path.exists(filepath):
+            logger.info(f"Generated audio at {filepath}")
+            return f"/{filepath}"
+        else:
+            logger.error(f"Failed to write audio file at {filepath}")
+            return None
+    except gcloud_exceptions.InvalidArgument as e:
+        logger.error(f"Invalid input for Google TTS: {str(e)}")
+        return None
+    except gcloud_exceptions.PermissionDenied as e:
+        logger.error(f"Permission denied for Google TTS: {str(e)}")
+        return None
+    except gcloud_exceptions.GoogleAPIError as e:
         logger.error(f"Google TTS error: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in Google TTS: {str(e)}")
         return None
 
 # ===================== FLASK ROUTES ============================
@@ -632,6 +645,7 @@ def chat():
         if not song_url:
             audio_path = synthesize_speech(response)
             if audio_path is None:
+                logger.warning("No audio generated for response")
                 return jsonify({"response": response, "audio": None, "song_url": None}), 200
 
         redis_store(prompt, response, audio_path, song_url)
