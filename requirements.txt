@@ -12,4 +12,6 @@ python-dotenv
 google-cloud-texttospeech
 google-api-core
 google-auth
-google-generative-ai
+
+# Use Google's index for generative AI
+google-generative-ai @ https://pypi.org/simple/google-generative-ai/
