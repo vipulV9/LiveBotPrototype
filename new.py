@@ -3,7 +3,7 @@ import time
 import json
 import numpy as np
 import requests
-import base64  # Added for base64 encoding of audio
+import base64
 from flask import Flask, render_template_string, request, jsonify, send_from_directory
 import google.generativeai as genai
 from google.cloud import texttospeech
@@ -12,7 +12,6 @@ import redis
 import logging
 from sentence_transformers import SentenceTransformer
 from dotenv import load_dotenv
-from apscheduler.schedulers.background import BackgroundScheduler
 
 # ===================== LOAD ENV VARIABLES =====================
 load_dotenv()
@@ -75,9 +74,8 @@ def load_embedder():
 
 # ===================== FLASK APP ===========================
 app = Flask(__name__)
-# Removed AUDIO_FOLDER since no file storage
 
-# Updated HTML to handle base64 audio URIs
+# HTML (supports base64 audio URIs)
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -164,15 +162,9 @@ HTML = '''
         }
 
         @keyframes pulse {
-            0% {
-                box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.2);
-            }
-            70% {
-                box-shadow: 0 0 0 20px rgba(255, 255, 255, 0);
-            }
-            100% {
-                box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
-            }
+            0% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.2); }
+            70% { box-shadow: 0 0 0 20px rgba(255, 255, 255, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(255, 255, 255, 0); }
         }
 
         .text-input-container {
@@ -414,7 +406,6 @@ HTML = '''
                     aiResponseDiv.textContent = `Assistant: ${data.response}`;
                     audioPlayerDiv.innerHTML = '';
                     if (data.audio) {
-                        // data.audio is now a base64 data URI
                         audioPlayerDiv.innerHTML = `
                             <audio controls autoplay>
                                 <source src="${data.audio}" type="audio/mpeg">
@@ -531,7 +522,7 @@ def redis_store(query, response, audio_base64=None, song_url=None):
     data = {
         "query": query,
         "response": response,
-        "audio": audio_base64,  # Now stores base64 URI instead of file path
+        "audio": audio_base64,
         "song_url": song_url,
         "embedding": embed(query).tolist()
     }
@@ -581,7 +572,6 @@ def synthesize_speech(text):
             voice=voice,
             audio_config=audio_config
         )
-        # Encode audio content to base64 data URI (no file storage)
         audio_base64 = base64.b64encode(response.audio_content).decode('utf-8')
         audio_uri = f"data:audio/mpeg;base64,{audio_base64}"
         logger.info(f"Generated base64 audio URI for response (length: {len(audio_base64)} chars)")
@@ -623,7 +613,7 @@ def chat():
         if cached:
             return jsonify({
                 "response": cached["response"],
-                "audio": cached["audio"],  # Base64 URI from cache
+                "audio": cached["audio"],
                 "song_url": cached.get("song_url")
             })
 
@@ -639,18 +629,13 @@ def chat():
                 return jsonify({"response": response, "audio": None, "song_url": None}), 200
 
         redis_store(prompt, response, audio_base64, song_url)
-        # Removed cleanup_audio() since no files are stored
 
         return jsonify({"response": response, "audio": audio_base64, "song_url": song_url})
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
 
-# ===================== SCHEDULE CLEANUP =======================
-# Removed scheduler since no files to clean up
-
 # ===================== RUN APP ================================
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     app.run(debug=False, host="0.0.0.0", port=port)
-    
