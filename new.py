@@ -1,8 +1,8 @@
-
 import os
 import time
 import json
 import numpy as np
+import requests
 from flask import Flask, render_template_string, request, jsonify, send_from_directory
 import google.generativeai as genai
 from google.cloud import texttospeech
@@ -74,7 +74,7 @@ app = Flask(__name__)
 AUDIO_FOLDER = "static/audio"
 os.makedirs(AUDIO_FOLDER, exist_ok=True)
 
-# HTML (Keep your existing HTML code here as-is)
+# Updated HTML to handle song playback
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -409,16 +409,23 @@ HTML = '''
                     showError(data.error);
                 } else {
                     aiResponseDiv.textContent = `Assistant: ${data.response}`;
-
+                    audioPlayerDiv.innerHTML = '';
                     if (data.audio) {
                         audioPlayerDiv.innerHTML = `
                             <audio controls autoplay>
-                                <source src="${data.audio}?t=${new Date().getTime()}" type="audio/mpeg">
+                                <source src="${data.audio}" type="audio/mpeg">
                                 Your browser does not support the audio element.
                             </audio>
                         `;
                     }
-
+                    if (data.song_url) {
+                        audioPlayerDiv.innerHTML = `
+                            <audio controls autoplay>
+                                <source src="${data.song_url}" type="audio/mpeg">
+                                Your browser does not support the audio element.
+                            </audio>
+                        `;
+                    }
                     responseContainer.style.display = 'flex';
                     statusDiv.textContent = 'Choose voice or text input';
                 }
@@ -438,6 +445,31 @@ HTML = '''
 </body>
 </html>
 '''
+
+# ===================== JIOSAAVN API ===========================
+def search_jiosaavn_song(query):
+    try:
+        url = "https://saavn.dev/api/search/songs"
+        params = {"query": query, "limit": 1}
+        response = requests.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("success") and data.get("data", {}).get("results"):
+            song = data["data"]["results"][0]
+            song_name = song.get("name", "Unknown Song")
+            song_url = next((item["url"] for item in song.get("downloadUrl", []) if item["quality"] == "320kbps"), None)
+            if song_url:
+                logger.info(f"Found song '{song_name}' with URL: {song_url}")
+                return song_name, song_url
+            else:
+                logger.warning(f"No 320kbps URL found for song '{song_name}'")
+                return song_name, None
+        else:
+            logger.warning(f"No songs found for query '{query}'")
+            return None, None
+    except requests.exceptions.RequestException as e:
+        logger.error(f"JioSaavn API error: {str(e)}")
+        return None, None
 
 # ===================== EMBEDDINGS & COSINE SIM ===================
 def embed(text):
@@ -491,12 +523,13 @@ def redis_search(query, threshold=0.8):
     logger.info(f"Cache miss for query '{query}'")
     return None
 
-def redis_store(query, response, audio_path):
+def redis_store(query, response, audio_path=None, song_url=None):
     key = f"qa:{hash(query)}"
     data = {
         "query": query,
         "response": response,
         "audio": audio_path,
+        "song_url": song_url,
         "embedding": embed(query).tolist()
     }
     try:
@@ -517,15 +550,25 @@ def cleanup_audio(max_age_hours=24):
 # ===================== GEMINI RESPONSE =========================
 def gemini_response(prompt):
     try:
+        # Check if the prompt is a song playback request
+        prompt_lower = prompt.lower()
+        if any(keyword in prompt_lower for keyword in ["play", "song", "music"]):
+            song_name, song_url = search_jiosaavn_song(prompt)
+            if song_name and song_url:
+                return f"Playing '{song_name}'", None, song_url
+            elif song_name:
+                return f"Found song '{song_name}' but no playable URL available", None, None
+            else:
+                return "Sorry, I couldn't find that song", None, None
+
+        # Fallback to Gemini for non-song queries
         model = genai.GenerativeModel("gemini-1.5-flash-8b")
-        response = model.generate_content(
-            f"Answer only in one short sentence. No explanation. Question: {prompt}"
-        )
+        response = model.generate_content(prompt)
         logger.info(f"Gemini generated response for prompt '{prompt}'")
-        return response.text.strip().replace("\n", " ")
+        return response.text.strip().replace("\n", " "), None, None
     except Exception as e:
         logger.error(f"Gemini API error: {str(e)}")
-        return f"Gemini API error: {str(e)}"
+        return f"Gemini API error: {str(e)}", None, None
 
 # ===================== GOOGLE TTS =============================
 def synthesize_speech(text, filename=None):
@@ -552,7 +595,7 @@ def synthesize_speech(text, filename=None):
         return f"/static/audio/{filename}"
     except gcloud_exceptions.GoogleCloudError as e:
         logger.error(f"Google TTS error: {str(e)}")
-        return f"Error with Google TTS: {str(e)}"
+        return None
 
 # ===================== FLASK ROUTES ============================
 @app.route("/")
@@ -578,21 +621,23 @@ def chat():
         if cached:
             return jsonify({
                 "response": cached["response"],
-                "audio": cached["audio"]
+                "audio": cached["audio"],
+                "song_url": cached.get("song_url")
             })
 
-        response = gemini_response(prompt)
+        response, audio_path, song_url = gemini_response(prompt)
         if response.startswith("Gemini API error"):
             return jsonify({"error": response}), 500
 
-        audio_path = synthesize_speech(response)
-        if audio_path.startswith("Error"):
-            return jsonify({"response": response, "audio": None}), 200
+        if not song_url:
+            audio_path = synthesize_speech(response)
+            if audio_path is None:
+                return jsonify({"response": response, "audio": None, "song_url": None}), 200
 
-        redis_store(prompt, response, audio_path)
+        redis_store(prompt, response, audio_path, song_url)
         cleanup_audio()
 
-        return jsonify({"response": response, "audio": audio_path})
+        return jsonify({"response": response, "audio": audio_path, "song_url": song_url})
     except Exception as e:
         logger.error(f"Server error: {str(e)}")
         return jsonify({"error": f"Server error: {str(e)}"}), 500
