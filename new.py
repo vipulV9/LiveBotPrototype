@@ -500,7 +500,7 @@ def gemini_response(prompt):
         response = model.generate_content(prompt)
         logger.info(f"Gemini generated response for prompt '{prompt}'")
         return response.text.strip().replace("\n", " "), None, None
-    except genai.exceptions.GoogleAPIError as e:
+    except genai.GoogleAPIError as e:
         logger.error(f"Gemini API error: {str(e)}")
         return f"Gemini API error: {str(e)}", None, None
     except Exception as e:
