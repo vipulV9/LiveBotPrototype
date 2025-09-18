@@ -62,16 +62,25 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # ===================== REDIS ================================
 try:
+    redis_password = os.getenv("REDIS_PASSWORD")
     r = redis.Redis(
         host=os.getenv("REDIS_HOST", "localhost"),
         port=int(os.getenv("REDIS_PORT", 6379)),
-        decode_responses=True
+        password=redis_password if redis_password else None,
+        decode_responses=True,
+        ssl=os.getenv("REDIS_SSL", "false").lower() == "true"
     )
     r.ping()
     logger.info("Connected to Redis")
+except redis.exceptions.AuthenticationError as e:
+    logger.error(f"Redis authentication failed: {e}")
+    raise ValueError("Redis authentication failed. Ensure REDIS_PASSWORD is set correctly.")
 except redis.exceptions.ConnectionError as e:
     logger.error(f"Failed to connect to Redis: {e}")
-    raise
+    raise ValueError(f"Redis connection error: {e}")
+except Exception as e:
+    logger.error(f"Unexpected Redis error: {e}")
+    raise ValueError(f"Unexpected Redis error: {e}")
 
 # ===================== SENTENCE TRANSFORMERS =================
 embedder = None  # Lazy-load to save memory
@@ -460,7 +469,7 @@ def redis_search(query, threshold=0.8):
             return best_match
         logger.info(f"Cache miss for query '{query}'")
         return None
-    except Exception as e:
+    except redis.exceptions.RedisError as e:
         logger.error(f"Redis search error: {e}")
         return None
 
