@@ -5,7 +5,7 @@ import glob
 import numpy as np
 import requests
 import tempfile
-from flask import Flask, render_template_string, request, jsonify, send_from_directory
+from flask import Flask, render_template_string, request, jsonify, send_from_directory, redirect
 import google.generativeai as genai
 from google.cloud import texttospeech
 from google.api_core import exceptions as gcloud_exceptions
@@ -40,24 +40,20 @@ if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY not set in .env")
     raise ValueError("GEMINI_API_KEY env var not set")
 
-# ===================== GOOGLE CREDENTIALS FIX =====================
-# ===================== GOOGLE CREDENTIALS FIX =====================
+# ===================== GOOGLE CREDENTIALS FIX =================
 google_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 if not google_creds:
     logger.error("GOOGLE_APPLICATION_CREDENTIALS environment variable not set")
     raise ValueError("Set GOOGLE_APPLICATION_CREDENTIALS env var")
 
 try:
-    creds_dict = json.loads(google_creds)  # Parse JSON string from Config Var
-
+    creds_dict = json.loads(google_creds)
     required_fields = ["type", "project_id", "private_key", "client_email", "client_id", "auth_uri", "token_uri"]
     missing_fields = [field for field in required_fields if field not in creds_dict]
     if missing_fields:
         logger.error(f"GOOGLE_APPLICATION_CREDENTIALS missing required fields: {missing_fields}")
         raise ValueError(f"GOOGLE_APPLICATION_CREDENTIALS missing fields: {missing_fields}")
 
-    import tempfile
-    # ✅ FIX: open in text mode with UTF-8 encoding
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json", encoding="utf-8") as temp:
         json.dump(creds_dict, temp)
         temp_path = temp.name
@@ -67,8 +63,6 @@ try:
 except json.JSONDecodeError:
     logger.error("Invalid JSON in GOOGLE_APPLICATION_CREDENTIALS")
     raise ValueError("GOOGLE_APPLICATION_CREDENTIALS must be valid JSON string")
-
-
 
 # ===================== CONFIGURE GEMINI =====================
 genai.configure(api_key=GEMINI_API_KEY)
@@ -111,7 +105,7 @@ except OSError as e:
     logger.error(f"Failed to create audio folder {AUDIO_FOLDER}: {str(e)}")
     raise
 
-# HTML (unchanged from previous discussions)
+# ===================== HTML ===========================
 HTML = '''
 <!DOCTYPE html>
 <html>
@@ -326,6 +320,7 @@ HTML = '''
 
         let recognizing = false;
         let recognition;
+        let audioUnlocked = false;
 
         if ('webkitSpeechRecognition' in window) {
             recognition = new webkitSpeechRecognition();
@@ -361,28 +356,42 @@ HTML = '''
             showError('Browser does not support SpeechRecognition API.');
         }
 
-        micButton.onclick = function() {
-            if (recognizing) {
-                recognition.stop();
-            } else {
-                responseContainer.style.display = 'none';
-                recognition.start();
+        function unlockAudio() {
+            if (!audioUnlocked) {
+                const audio = new Audio('/static/silent.mp3');
+                audio.play().then(() => {
+                    audioUnlocked = true;
+                    console.log('Audio context unlocked');
+                }).catch(error => {
+                    console.error('Failed to unlock audio:', error);
+                });
             }
-        };
+        }
 
-        sendButton.onclick = function() {
-            const text = textInput.value.trim();
-            if (text) {
-                processUserInput(text);
-                textInput.value = '';
+        function tryPlayAudio(audio, retries = 3, delay = 500) {
+            if (retries === 0) {
+                audioPlayerDiv.innerHTML += `
+                    <button onclick="playAudioManually()">Play Audio</button>
+                `;
+                showError('Autoplay blocked. Click the Play button to hear the response.');
+                return;
             }
-        };
+            audio.play().then(() => {
+                audioUnlocked = true;
+            }).catch(error => {
+                console.error('Autoplay attempt failed:', error);
+                setTimeout(() => tryPlayAudio(audio, retries - 1, delay), delay);
+            });
+        }
 
-        textInput.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter') {
-                sendButton.click();
-            }
-        });
+        function playAudioManually() {
+            const audio = document.getElementById('audio-player');
+            audio.play().then(() => {
+                audioUnlocked = true;
+            }).catch(error => {
+                showError(`Audio playback error: ${error.message}`);
+            });
+        }
 
         function processUserInput(input) {
             userQuestionDiv.textContent = `You: ${input}`;
@@ -399,21 +408,24 @@ HTML = '''
                 } else {
                     aiResponseDiv.textContent = `Assistant: ${data.response}`;
                     audioPlayerDiv.innerHTML = '';
-                    if (data.audio) {
+                    if (data.audio || data.song_url) {
+                        const audioSrc = data.audio || data.song_url;
                         audioPlayerDiv.innerHTML = `
-                            <audio controls autoplay>
-                                <source src="${data.audio}" type="audio/mpeg">
+                            <audio id="audio-player" controls>
+                                <source src="${audioSrc}" type="audio/mpeg">
                                 Your browser does not support the audio element.
                             </audio>
                         `;
-                    }
-                    if (data.song_url) {
-                        audioPlayerDiv.innerHTML = `
-                            <audio controls autoplay>
-                                <source src="${data.song_url}" type="audio/mpeg">
-                                Your browser does not support the audio element.
-                            </audio>
-                        `;
+                        const audio = document.getElementById('audio-player');
+                        audio.load();
+                        if (audioUnlocked) {
+                            tryPlayAudio(audio);
+                        } else {
+                            audioPlayerDiv.innerHTML += `
+                                <button onclick="playAudioManually()">Play Audio</button>
+                            `;
+                            showError('Click the Play button to hear the response.');
+                        }
                     }
                     responseContainer.style.display = 'flex';
                     statusDiv.textContent = 'Choose voice or text input';
@@ -423,6 +435,31 @@ HTML = '''
                 showError(`Error: ${error}`);
             });
         }
+
+        micButton.onclick = function() {
+            if (recognizing) {
+                recognition.stop();
+            } else {
+                responseContainer.style.display = 'none';
+                unlockAudio();
+                recognition.start();
+            }
+        };
+
+        sendButton.onclick = function() {
+            const text = textInput.value.trim();
+            if (text) {
+                unlockAudio();
+                processUserInput(text);
+                textInput.value = '';
+            }
+        };
+
+        textInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') {
+                sendButton.click();
+            }
+        });
 
         function showError(message) {
             statusDiv.textContent = 'Error occurred';
@@ -448,6 +485,10 @@ def search_jiosaavn_song(query):
             song_name = song.get("name", "Unknown Song")
             song_url = next((item["url"] for item in song.get("downloadUrl", []) if item["quality"] == "320kbps"), None)
             if song_url:
+                test_response = requests.head(song_url, timeout=5, allow_redirects=True)
+                if test_response.status_code != 200:
+                    logger.warning(f"Song URL {song_url} is not accessible (status: {test_response.status_code})")
+                    return song_name, None
                 logger.info(f"Found song '{song_name}' with URL: {song_url}")
                 return song_name, song_url
             else:
@@ -572,13 +613,7 @@ def synthesize_speech(text, filename=None):
             text = text[:5000]
 
         logger.info(f"Synthesizing speech for text (length: {len(text)}): {text[:50]}...")
-        try:
-            client = texttospeech.TextToSpeechClient()
-            logger.info("Google TTS client initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize Google TTS client: {str(e)}", exc_info=True)
-            return None
-
+        client = texttospeech.TextToSpeechClient()
         input_text = texttospeech.SynthesisInput(text=text)
         voice = texttospeech.VoiceSelectionParams(
             language_code="en-US",
@@ -587,49 +622,32 @@ def synthesize_speech(text, filename=None):
         audio_config = texttospeech.AudioConfig(
             audio_encoding=texttospeech.AudioEncoding.MP3
         )
-        logger.info("Sending request to Google TTS API")
-        try:
-            response = client.synthesize_speech(
-                input=input_text,
-                voice=voice,
-                audio_config=audio_config
-            )
-            logger.info(f"Received TTS response (audio content length: {len(response.audio_content)} bytes)")
-        except Exception as e:
-            logger.error(f"Google TTS API call failed: {str(e)}", exc_info=True)
-            return None
-
-        if len(response.audio_content) == 0:
-            logger.error("Google TTS returned empty audio content")
+        response = client.synthesize_speech(
+            input=input_text,
+            voice=voice,
+            audio_config=audio_config
+        )
+        if len(response.audio_content) < 1000:
+            logger.error(f"Audio content too small ({len(response.audio_content)} bytes)")
             return None
 
         filename = filename or f"reply_{int(time.time() * 1000)}.mp3"
         filepath = os.path.join(AUDIO_FOLDER, filename)
-        logger.info(f"Writing audio to {filepath}")
-        try:
-            with open(filepath, "wb") as out:
-                out.write(response.audio_content)
-                out.flush()
-                os.fsync(out.fileno())
-            if os.path.exists(filepath):
-                file_size = os.path.getsize(filepath)
-                logger.info(f"Generated audio at {filepath} (size: {file_size} bytes)")
-                return f"/static/audio/{filename}"
-            else:
-                logger.error(f"File existence check failed for {filepath}")
+        with open(filepath, "wb") as out:
+            out.write(response.audio_content)
+            out.flush()
+            os.fsync(out.fileno())
+        if os.path.exists(filepath):
+            file_size = os.path.getsize(filepath)
+            if file_size < 1000:
+                logger.error(f"Audio file {filepath} is too small ({file_size} bytes)")
                 return None
-        except IOError as e:
-            logger.error(f"File I/O error writing audio to {filepath}: {str(e)}")
+            os.chmod(filepath, 0o644)
+            logger.info(f"Generated audio at {filepath} (size: {file_size} bytes)")
+            return f"/static/audio/{filename}"
+        else:
+            logger.error(f"File existence check failed for {filepath}")
             return None
-    except gcloud_exceptions.InvalidArgument as e:
-        logger.error(f"Invalid input for Google TTS: {str(e)}")
-        return None
-    except gcloud_exceptions.PermissionDenied as e:
-        logger.error(f"Permission denied for Google TTS (check GOOGLE_APPLICATION_CREDENTIALS): {str(e)}")
-        return None
-    except gcloud_exceptions.QuotaExceeded as e:
-        logger.error(f"Google TTS quota exceeded: {str(e)}")
-        return None
     except gcloud_exceptions.GoogleAPIError as e:
         logger.error(f"Google TTS API error: {str(e)}", exc_info=True)
         return None
@@ -638,6 +656,12 @@ def synthesize_speech(text, filename=None):
         return None
 
 # ===================== FLASK ROUTES ============================
+@app.before_request
+def enforce_https():
+    if not app.debug and request.url.startswith('http://'):
+        url = request.url.replace('http://', 'https://', 1)
+        return redirect(url, code=301)
+
 @app.route("/")
 def index():
     return render_template_string(HTML)
@@ -648,6 +672,26 @@ def favicon():
     if os.path.exists(favicon_path):
         return send_from_directory("static", "favicon.ico")
     return "", 204
+
+@app.route("/static/silent.mp3")
+def serve_silent_mp3():
+    try:
+        return send_from_directory("static", "silent.mp3", mimetype="audio/mpeg")
+    except Exception as e:
+        logger.error(f"Error serving silent.mp3: {str(e)}")
+        return jsonify({"error": "Silent audio file not found"}), 404
+
+@app.route("/static/audio/<filename>")
+def serve_audio(filename):
+    try:
+        filepath = os.path.join(AUDIO_FOLDER, filename)
+        if not os.path.exists(filepath):
+            logger.error(f"Audio file {filepath} not found")
+            return jsonify({"error": "Audio file not found"}), 404
+        return send_from_directory(AUDIO_FOLDER, filename, mimetype="audio/mpeg")
+    except Exception as e:
+        logger.error(f"Error serving audio file {filename}: {str(e)}")
+        return jsonify({"error": "Audio file not found"}), 404
 
 @app.route("/chat", methods=["POST"])
 def chat():
@@ -684,7 +728,7 @@ def chat():
         redis_store(prompt, response, audio_path, song_url)
         cleanup_audio()
 
-        logger.info(f"Returning new response for prompt: {prompt}")
+        logger.info(f"Returning new response for prompt: {prompt}, audio: {audio_path}, song_url: {song_url}")
         return jsonify({"response": response, "audio": audio_path, "song_url": song_url})
     except Exception as e:
         logger.error(f"Server error in /chat: {str(e)}", exc_info=True)
