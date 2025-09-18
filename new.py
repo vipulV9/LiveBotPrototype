@@ -24,7 +24,7 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
-logger = logging.getLogger(_name_)
+app = Flask(__name__)
 
 # ===================== VALIDATE ENV VARIABLES =================
 # ===================== CONFIGURE GEMINI =====================
